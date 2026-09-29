@@ -1,0 +1,19 @@
+name: test
+on:
+  push:
+  pull_request:
+  release:
+    types: [published]
+jobs:
+  unit:
+    strategy:
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tests and smoke
+        run: |
+          python3 -m py_compile nativehost-doctor
+          python3 -m unittest discover -s tests -v
+          python3 nativehost-doctor --host com.example.host --extension-id aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa

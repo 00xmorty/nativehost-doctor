@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+"""Offline, read-only native messaging manifest preflight for Chrome/Chromium."""
+import argparse
+import json
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+HOST = re.compile(r"[a-z0-9_]+(?:\.[a-z0-9_]+)*\Z")
+EXT = re.compile(r"[a-p]{32}\Z")
+
+
+def locations(browser, system=None, home=None):
+    system = system or sys.platform
+    home = Path(home) if home is not None else Path.home()
+    if system == "darwin":
+        names = {"chrome": ("Google/Chrome", "Google/Chrome"),
+                 "chromium": ("Chromium", "Chromium")}
+        user, global_dir = names[browser]
+        return [home / "Library/Application Support" / user / "NativeMessagingHosts",
+                Path("/Library/Application Support" if browser == "chromium" else "/Library") / global_dir / "NativeMessagingHosts"]
+    if system.startswith("linux"):
+        names = {"chrome": ("google-chrome", "opt/chrome"),
+                 "chromium": ("chromium", "chromium")}
+        user, global_dir = names[browser]
+        return [home / ".config" / user / "NativeMessagingHosts",
+                Path("/etc") / global_dir / "native-messaging-hosts"]
+    raise ValueError("Only macOS and Linux are supported")
+
+
+def inspect_manifest(file, host, origin):
+    try:
+        info = file.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 65536:
+            return "UNSAFE_OR_OVERSIZE"
+        with file.open("r", encoding="utf-8") as stream:
+            data = json.load(stream)
+        if not isinstance(data, dict):
+            return "INVALID_JSON_SCHEMA"
+        if (data.get("name") != host or data.get("type") != "stdio" or
+                not isinstance(data.get("description"), str) or
+                not isinstance(data.get("allowed_origins"), list) or
+                not all(isinstance(x, str) for x in data["allowed_origins"])):
+            return "INVALID_JSON_SCHEMA"
+        if origin not in data["allowed_origins"]:
+            return "ORIGIN_NOT_ALLOWED"
+        binary = data.get("path")
+        if not isinstance(binary, str) or not os.path.isabs(binary):
+            return "INVALID_BINARY_PATH"
+        target = Path(binary)
+        metadata = target.stat()
+        if not stat.S_ISREG(metadata.st_mode) or not os.access(target, os.X_OK):
+            return "BINARY_NOT_EXECUTABLE"
+        return "PREFLIGHT_OK_NOT_CONNECTION_PROOF"
+    except FileNotFoundError:
+        return "BINARY_OR_MANIFEST_MISSING" if file.exists() else "MISSING"
+    except (PermissionError, OSError):
+        return "UNREADABLE"
+    except (ValueError, UnicodeError, RecursionError):
+        return "INVALID_JSON_SCHEMA"
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--host", required=True, help="native messaging host name")
+    parser.add_argument("--extension-id", required=True, help="32-character Chrome extension ID")
+    parser.add_argument("--browser", choices=("chrome", "chromium"), default="chrome")
+    args = parser.parse_args()
+    if not HOST.fullmatch(args.host) or not EXT.fullmatch(args.extension_id):
+        parser.error("invalid host name or extension ID (32 lowercase a-p characters)")
+    origin = "chrome-extension://" + args.extension_id + "/"
+    try:
+        dirs = locations(args.browser)
+    except ValueError as error:
+        parser.error(str(error))
+    print("NativeHost Doctor — offline, read-only; no host execution")
+    for label, directory in zip(("user", "system"), dirs):
+        status = inspect_manifest(directory / (args.host + ".json"), args.host, origin)
+        print(f"{label}: {status}")
+    print("A passing preflight does not prove a working connection. Check browser/extension diagnostics if needed; do not share raw manifests or logs.")
+
+
+if __name__ == "__main__":
+    main()
